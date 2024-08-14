@@ -165,3 +165,5 @@ cython_debug/
 datasets/
 checkpoints/
 slurm_scripts/
+wandb/
+runs/
