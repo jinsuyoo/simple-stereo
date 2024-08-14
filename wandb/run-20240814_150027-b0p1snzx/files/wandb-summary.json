@@ -1,0 +1,1 @@
+{"global_step": 78, "_timestamp": 1723662260.119324, "train_loss": 26.321516036987305, "learning_rate": 0.0006111126858741045, "_runtime": 232.36051297187805, "_step": 78, "val-things-epe": 17.023324966430664, "val-things-d1": 86.03358459472656, "_wandb": {"runtime": 253}}

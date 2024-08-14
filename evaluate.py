@@ -127,13 +127,15 @@ def validate_things(model, mixed_prec=False):
         image1 = image1[None].cuda()
         image2 = image2[None].cuda()
 
+        # negative disparity to positive disparity
+        flow_gt = torch.abs(flow_gt)
+
         padder = InputPadder(image1.shape, divis_by=32)
         image1, image2 = padder.pad(image1, image2)
 
         #with autocast(enabled=mixed_prec):
         #    flow_pr = model(image1, image2)
         flow_pr = model(image1, image2)
-
         flow_pr = padder.unpad(flow_pr).cpu().squeeze(0)
         assert flow_pr.shape == flow_gt.shape, (flow_pr.shape, flow_gt.shape)
         epe = torch.sum((flow_pr - flow_gt)**2, dim=0).sqrt()
@@ -141,10 +143,16 @@ def validate_things(model, mixed_prec=False):
         epe = epe.flatten()
         val = (valid_gt.flatten() >= 0.5) & (flow_gt.abs().flatten() < 192)
 
+        # NOTE: skip idx 128 as it doesn't have any gt disparity less than 192
+        if val.sum() == 0:
+            print(f"Skipping idx {val_id} as it doesn't have any valid gt disparity less than 192")
+            continue
+        
         out = (epe > 1.0)
         epe_list.append(epe[val].mean().item())
         out_list.append(out[val].cpu().numpy())
 
+    #import pdb; pdb.set_trace()
     epe_list = np.array(epe_list)
     out_list = np.concatenate(out_list)
 
@@ -152,7 +160,7 @@ def validate_things(model, mixed_prec=False):
     d1 = 100 * np.mean(out_list)
 
     print("Validation FlyingThings: %f, %f" % (epe, d1))
-    return {'things-epe': epe, 'things-d1': d1}
+    return {'val-things-epe': epe, 'val-things-d1': d1}
 
 
 @torch.no_grad()

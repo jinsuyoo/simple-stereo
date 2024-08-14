@@ -4,15 +4,23 @@ import random
 import time
 import numpy as np
 from tqdm import tqdm
-
+import wandb
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import logging
 
+from torch.utils.tensorboard import SummaryWriter
 import core.datasets as datasets
 from core.models import *
 from evaluate import validate_things
+
+"""
+
+python train.py --log_wandb --num_steps 100 --val_freq 20 --batch_size 8
+"""
+
 
 def parse_config():
     """
@@ -26,8 +34,10 @@ def parse_config():
                         help='select model')
     parser.add_argument('--data_path', default='data/SceneFlowData/',
                         help='data path')
-    parser.add_argument('--num_epochs', type=int, default=10,
-                        help='number of epochs to train')
+    parser.add_argument('--num_steps', type=int, default=100000,
+                        help='number of steps')
+    parser.add_argument('--val_freq', type=int, default=1000,
+                        help='validation frequency')
     parser.add_argument('--restore_ckpt', default= None,
                         help='load model')
     parser.add_argument('--save_path', default=None,
@@ -36,9 +46,11 @@ def parse_config():
                         help='enables CUDA training')
     parser.add_argument('--seed', type=int, default=310, metavar='S',
                         help='random seed (default: 310)')
+    parser.add_argument('--log_wandb', action='store_true', default=False,
+                        help='log to wandb')
 
     # Training hyperparameters
-    parser.add_argument('--batch_size', type=int, default=6, 
+    parser.add_argument('--batch_size', type=int, default=8, 
                         help="batch size used during training.")
     parser.add_argument('--train_datasets', nargs='+', default=['sceneflow'], 
                         help="training datasets.")
@@ -87,11 +99,66 @@ def adjust_learning_rate(optimizer, epoch):
 
 
 
+class Logger:
+
+    SUM_FREQ = 100
+
+    def __init__(self, model, scheduler):
+        self.model = model
+        self.scheduler = scheduler
+        self.total_steps = 0
+        self.running_loss = {}
+        self.writer = SummaryWriter(log_dir='runs')
+
+    def _print_training_status(self):
+        metrics_data = [self.running_loss[k]/Logger.SUM_FREQ for k in sorted(self.running_loss.keys())]
+        training_str = "[{:6d}, {:10.7f}] ".format(self.total_steps+1, self.scheduler.get_last_lr()[0])
+        metrics_str = ("{:10.4f}, "*len(metrics_data)).format(*metrics_data)
+        
+        # print the training status
+        logging.info(f"Training Metrics ({self.total_steps}): {training_str + metrics_str}")
+
+        if self.writer is None:
+            self.writer = SummaryWriter(log_dir='runs')
+
+        for k in self.running_loss:
+            self.writer.add_scalar(k, self.running_loss[k]/Logger.SUM_FREQ, self.total_steps)
+            self.running_loss[k] = 0.0
+
+    def push(self, metrics):
+        self.total_steps += 1
+
+        for key in metrics:
+            if key not in self.running_loss:
+                self.running_loss[key] = 0.0
+
+            self.running_loss[key] += metrics[key]
+
+        if self.total_steps % Logger.SUM_FREQ == Logger.SUM_FREQ-1:
+            self._print_training_status()
+            self.running_loss = {}
+
+    def write_dict(self, results):
+        if self.writer is None:
+            self.writer = SummaryWriter(log_dir='runs')
+
+        for key in results:
+            self.writer.add_scalar(key, results[key], self.total_steps)
+
+    def close(self):
+        self.writer.close()
+
+
+
 def train():
     """
     Train the model.
     """
     args = parse_config()
+
+    if args.log_wandb:
+        wandb.login()
+        wandb.init(project="simple-stereo", sync_tensorboard=True)
 
 
     """
@@ -100,38 +167,23 @@ def train():
 
     train_loader = datasets.fetch_dataloader(args)
 
-    total_steps = len(train_loader) * args.num_epochs
-    print(f'Total number of training steps: {total_steps}')
+    #total_steps = len(train_loader) * args.num_epochs
+    #print(f'Total number of training steps: {total_steps}')
 
     """
     Create the model
     """
+    
+    assert args.model == 'basic', 'Only basic model is supported for now'
 
-    if args.model == 'stackhourglass':
-        raise NotImplementedError('Stackhourglass model not implemented')
-        #model = stackhourglass(args.max_disp)
-    elif args.model == 'basic':
-        model = basic(args.max_disp)
-    else:
-        raise ValueError('Invalid model type')
+    model = basic(args.max_disp)
 
     if args.cuda:
         model = nn.DataParallel(model)
         model.cuda()
-    
-    # Print number of model parameters 
-    #print(f'Number of model parameters: {sum([p.data.nelement() for p in model.parameters()])}')
 
     # print number of model parameters more elegantly (x.xxM)
     print(f'Number of model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M')
-
-
-    #if args.loadmodel is not None:
-    #    print('Load pretrained model')
-    #    pretrain_dict = torch.load(args.loadmodel)
-    #    model.load_state_dict(pretrain_dict['state_dict'])
-
-    #print('Number of model parameters: {}'.format(sum([p.data.nelement() for p in model.parameters()])))
 
     optimizer = optim.AdamW(
         model.parameters(), 
@@ -142,21 +194,26 @@ def train():
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=args.lr, 
-        total_steps=total_steps+100,
+        total_steps=args.num_steps + 100,
         pct_start=0.01, 
         cycle_momentum=False, 
         anneal_strategy='linear'
     )
 
-    #return
+    logger = Logger(model, scheduler)
 
+    should_keep_training = True
+    global_batch_num = 0
     # Training loop
-    for epoch in range(args.num_epochs):
+    while should_keep_training:
+
         for i_batch, (_, *data_blob) in enumerate(tqdm(train_loader)):
             optimizer.zero_grad()
             image1, image2, flow, valid = [x.cuda() for x in data_blob]
-
             valid = valid.bool()
+
+            # negative disparity to positive disparity
+            flow = torch.abs(flow)
 
             assert model.training
             depth_predictions = model(image1, image2)
@@ -172,114 +229,33 @@ def train():
                 print('NaN loss encountered. Skipping this batch.')
                 continue
             
+            logger.writer.add_scalar('train_loss', loss.item(), global_batch_num)
+            logger.writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], global_batch_num)
+            global_batch_num += 1
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             optimizer.step()
             scheduler.step()
 
-            # Log the loss
-            if (i_batch + 1) % 100 == 0:
-                print(f'Epoch {epoch+1}, Batch {i_batch}, Loss: {loss.item()}')
+            if (global_batch_num + 1) % args.val_freq == 0:
+                # save the model with filename containing the epoch number 3 digits wide
+                current_save_path = os.path.join(args.save_path, f'checkpoint_{global_batch_num + 1:03d}.pth')
+                logging.info(f'Saving model to {current_save_path}')
+                torch.save(model.state_dict(), current_save_path)
 
-            if i_batch == 1000:
-                break
+                results = validate_things(model.module)
+                logger.write_dict(results)
 
-        # save the model with filename containing the epoch number 3 digits wide
-        current_save_path = os.path.join(args.save_path, f'checkpoint_ep{epoch+1:03d}.pth')
-        print(f'Saving model to {current_save_path}')
-        torch.save(model.state_dict(), current_save_path)
-
-        """
-        validation code
-        """
-        results = validate_things(model.module)
-
-        #logger.write_dict(results)
-
-        #model.train()
-        #model.module.freeze_bn()
+        if global_batch_num >= total_steps:
+            should_keep_training = False
+            break
 
     print("FINISHED TRAINING")
-    #logger.close()
-    #PATH = 'checkpoints/%s.pth' % args.name
-    #torch.save(model.state_dict(), PATH)
-
-
-    """
-
-
-    start_full_time = time.time()
-	for epoch in range(0, args.epochs):
-	   print('This is %d-th epoch' %(epoch))
-	   total_train_loss = 0
-	   adjust_learning_rate(optimizer,epoch)
-
-	   ## training ##
-	   for batch_idx, (imgL_crop, imgR_crop, disp_crop_L) in enumerate(TrainImgLoader):
-	     start_time = time.time()
-
-	     #loss = train(imgL_crop,imgR_crop, disp_crop_L)
-
-         model.train()
-
-        if args.cuda:
-            imgL, imgR, disp_true = imgL.cuda(), imgR.cuda(), disp_L.cuda()
-
-       #---------
-        mask = disp_true < args.maxdisp
-        mask.detach_()
-        #----
-        optimizer.zero_grad()
-        
-        if args.model == 'stackhourglass':
-            output1, output2, output3 = model(imgL,imgR)
-            output1 = torch.squeeze(output1,1)
-            output2 = torch.squeeze(output2,1)
-            output3 = torch.squeeze(output3,1)
-            loss = 0.5*F.smooth_l1_loss(output1[mask], disp_true[mask], size_average=True) + 0.7*F.smooth_l1_loss(output2[mask], disp_true[mask], size_average=True) + F.smooth_l1_loss(output3[mask], disp_true[mask], size_average=True) 
-        elif args.model == 'basic':
-            output = model(imgL,imgR)
-            output = torch.squeeze(output,1)
-            loss = F.smooth_l1_loss(output[mask], disp_true[mask], size_average=True)
-
-        loss.backward()
-        optimizer.step()
-
-
-
-	     print('Iter %d training loss = %.3f , time = %.2f' %(batch_idx, loss, time.time() - start_time))
-	     total_train_loss += loss
-	   print('epoch %d total training loss = %.3f' %(epoch, total_train_loss/len(TrainImgLoader)))
-
-	   #SAVE
-	   savefilename = args.savemodel+'/checkpoint_'+str(epoch)+'.tar'
-	   torch.save({
-		    'epoch': epoch,
-		    'state_dict': model.state_dict(),
-                    'train_loss': total_train_loss/len(TrainImgLoader),
-		}, savefilename)
-
-	print('full training time = %.2f HR' %((time.time() - start_full_time)/3600))
-
-	#------------- TEST ------------------------------------------------------------
-	total_test_loss = 0
-	for batch_idx, (imgL, imgR, disp_L) in enumerate(TestImgLoader):
-	       test_loss = test(imgL,imgR, disp_L)
-	       print('Iter %d test loss = %.3f' %(batch_idx, test_loss))
-	       total_test_loss += test_loss
-
-	print('total test loss = %.3f' %(total_test_loss/len(TestImgLoader)))
-	#----------------------------------------------------------------------------------
-	#SAVE test information
-	savefilename = args.savemodel+'testinformation.tar'
-	torch.save({
-		    'test_loss': total_test_loss/len(TestImgLoader),
-		}, savefilename)
-    """
-
-
-
+    if args.log_wandb:
+        wandb.finish()
+    
 
 if __name__ == '__main__':
    train()
