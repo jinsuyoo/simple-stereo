@@ -229,8 +229,6 @@ def train():
                 print('NaN loss encountered. Skipping this batch.')
                 continue
             
-            logger.writer.add_scalar('train_loss', loss.item(), global_batch_num)
-            logger.writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], global_batch_num)
             global_batch_num += 1
 
             loss.backward()
@@ -239,9 +237,12 @@ def train():
             optimizer.step()
             scheduler.step()
 
-            if (global_batch_num + 1) % args.val_freq == 0:
+            logger.writer.add_scalar('train_loss', loss.item(), global_batch_num)
+            logger.writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], global_batch_num)
+
+            if global_batch_num % args.val_freq == 0:
                 # save the model with filename containing the epoch number 3 digits wide
-                current_save_path = os.path.join(args.save_path, f'checkpoint_{global_batch_num + 1:03d}.pth')
+                current_save_path = os.path.join(args.save_path, f'checkpoint_{global_batch_num:06d}.pth')
                 logging.info(f'Saving model to {current_save_path}')
                 torch.save(model.state_dict(), current_save_path)
 
