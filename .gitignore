@@ -167,3 +167,6 @@ checkpoints/
 slurm_scripts/
 wandb/
 runs/
+results/
+results_kitti/
+results_things/

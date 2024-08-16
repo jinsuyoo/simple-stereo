@@ -72,7 +72,7 @@ class StereoDataset(data.Dataset):
 
         img1 = np.array(img1).astype(np.uint8)
         img2 = np.array(img2).astype(np.uint8)
-
+        #print(img1.shape, img2.shape, disp.shape)
         disp = np.array(disp).astype(np.float32)
         flow = np.stack([-disp, np.zeros_like(disp)], axis=-1)
 
@@ -244,7 +244,7 @@ class TartanAir(StereoDataset):
             self.disparity_list += [ disp ]
 
 class KITTI(StereoDataset):
-    def __init__(self, aug_params=None, root='datasets/KITTI', image_set='training'):
+    def __init__(self, aug_params=None, root='datasets/KITTI_Stereo_2015', image_set='training'):
         super(KITTI, self).__init__(aug_params, sparse=True, reader=frame_utils.readDispKITTI)
         assert os.path.exists(root)
 
@@ -299,11 +299,14 @@ def fetch_dataloader(args):
             clean_dataset = SceneFlowDatasets(aug_params, dstype='frames_cleanpass')
             final_dataset = SceneFlowDatasets(aug_params, dstype='frames_finalpass')
             new_dataset = (clean_dataset*4) + (final_dataset*4)
-            #new_dataset = clean_dataset + final_dataset
             print(f"Adding {len(new_dataset)} samples from SceneFlow")
         elif 'kitti' in dataset_name:
-            new_dataset = KITTI(aug_params, split=dataset_name)
+            new_dataset = KITTI(aug_params)
+            # NOTE: take the first 100 samples from KITTI for fine-tuning
+            new_dataset.image_list = new_dataset.image_list[:100]
+            new_dataset.disparity_list = new_dataset.disparity_list[:100]
             print(f"Adding {len(new_dataset)} samples from KITTI")
+            new_dataset = new_dataset*10
         elif dataset_name == 'sintel_stereo':
             new_dataset = SintelStereo(aug_params)*140
             print(f"Adding {len(new_dataset)} samples from Sintel Stereo")

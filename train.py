@@ -14,11 +14,21 @@ import logging
 from torch.utils.tensorboard import SummaryWriter
 import core.datasets as datasets
 from core.models import *
-from evaluate import validate_things
+from evaluate import validate_things_v2, validate_kitti_v2
 
 """
 
 python train.py --log_wandb --num_steps 100 --val_freq 20 --batch_size 8
+
+# finetune on kitti
+python train.py \
+    --restore_ckpt checkpoints/2024-08-14_22-22-40/checkpoint_035000.pth \
+    --log_wandb --num_steps 5000 --val_freq 100 --batch_size 8 \
+    --train_datasets kitti \
+    --lr 1e-5 \
+    --image_size 320 1000 \
+    --save_path 2024-08-14_22-22-40_finetune_kitti
+
 """
 
 
@@ -54,6 +64,8 @@ def parse_config():
                         help="batch size used during training.")
     parser.add_argument('--train_datasets', nargs='+', default=['sceneflow'], 
                         help="training datasets.")
+    parser.add_argument('--val_dataset', default='things',
+                        help="validation dataset.")
     parser.add_argument('--lr', type=float, default=0.001, 
                         help="max learning rate.")
     parser.add_argument('--image_size', type=int, nargs='+', default=[256, 512], 
@@ -80,6 +92,9 @@ def parse_config():
     if args.save_path is None:
         # Generate a save path if not provided based on the current time
         args.save_path = 'checkpoints/' + time.strftime('%Y-%m-%d_%H-%M-%S')
+    else:
+        # Use the provided save path
+        args.save_path = 'checkpoints/' + args.save_path
 
     # Create the save path if it does not exist
     if not os.path.exists(args.save_path):
@@ -151,40 +166,33 @@ class Logger:
 
 
 def train():
-    """
-    Train the model.
-    """
     args = parse_config()
 
     if args.log_wandb:
         wandb.login()
         wandb.init(project="simple-stereo", sync_tensorboard=True)
 
-
-    """
-    Load the data
-    """
-
+    # Load the data
     train_loader = datasets.fetch_dataloader(args)
 
-    #total_steps = len(train_loader) * args.num_epochs
-    #print(f'Total number of training steps: {total_steps}')
-
-    """
-    Create the model
-    """
-    
+    # Create the model
     assert args.model == 'basic', 'Only basic model is supported for now'
 
     model = basic(args.max_disp)
+    model = nn.DataParallel(model)
+        
+    if args.restore_ckpt is not None:
+        logging.info(f'Restoring model from {args.restore_ckpt}')
+        checkpoint = torch.load(args.restore_ckpt)
+        model.load_state_dict(checkpoint)
+        logging.info('Model restored successfully')
+    
+    model.cuda()
 
-    if args.cuda:
-        model = nn.DataParallel(model)
-        model.cuda()
+    logging.info(f'Model: {args.model}')
+    logging.info(f'Number of model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M')
 
-    # print number of model parameters more elegantly (x.xxM)
-    print(f'Number of model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M')
-
+    # Set up the optimizer and scheduler
     optimizer = optim.AdamW(
         model.parameters(), 
         lr=args.lr, 
@@ -212,14 +220,14 @@ def train():
             image1, image2, flow, valid = [x.cuda() for x in data_blob]
             valid = valid.bool()
 
-            # negative disparity to positive disparity
+            # Negative disparity to positive disparity
             flow = torch.abs(flow)
 
             assert model.training
             depth_predictions = model(image1, image2)
             assert model.training
 
-            # squeeze out the channel dimension (B, 1, H, W) -> (B, H, W)
+            # Squeeze out the channel dimension (B, 1, H, W) -> (B, H, W)
             depth_predictions = depth_predictions.squeeze(1)
             flow = flow.squeeze(1)
 
@@ -246,10 +254,17 @@ def train():
                 logging.info(f'Saving model to {current_save_path}')
                 torch.save(model.state_dict(), current_save_path)
 
-                results = validate_things(model.module)
+                if args.val_dataset == 'things':
+                    results = validate_things_v2(model.module)
+                elif args.val_dataset == 'kitti':
+                    results = validate_kitti_v2(model.module)
+                else:
+                    raise ValueError(f'Unknown validation dataset: {args.val_dataset}')
                 logger.write_dict(results)
 
-        if global_batch_num >= total_steps:
+                model.train()
+
+        if global_batch_num >= args.num_steps:
             should_keep_training = False
             break
 

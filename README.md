@@ -1,5 +1,15 @@
-# simple-stereo
+# Stereo depth estimation
 Simple implementation of stereo depth estimation
+
+## What is stereo depth estimation?
+
+## What you will do?
+
+We have already trained a simple neural network for stereo depth estimation. That is, given two left and right images, the network estimates a disparity map.
+
+You will first run this code and see the results.
+
+Before that, you will need to setup a virtual environment to run the code.
 
 ## How to Run
 
