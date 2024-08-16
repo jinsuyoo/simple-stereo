@@ -1,7 +1,7 @@
 # Stereo depth estimation
-Simple implementation of stereo depth estimation
+Simple implementation of stereo depth estimation.
 
-## What is stereo depth estimation?
+## What is stereo depth?
 
 ## What you will do?
 
@@ -43,3 +43,7 @@ To run this repository, please follow the steps below:
 
 That's it! You have successfully run the simple-stereo repository. Feel free to explore the code and make any modifications as needed.
 
+
+# Acknowledgment
+
+Implementation is based on [PSMNet](https://github.com/JiaRenChang/PSMNet) and [RAFT-Stereo](https://github.com/princeton-vl/RAFT-Stereo).
