@@ -366,7 +366,7 @@ def validate_middlebury(model, iters=32, split='F', mixed_prec=False):
 
 
 
-# python evaluate.py --restore_ckpt checkpoints/2024-08-14_22-22-40/checkpoint_035000.pth --dataset things --save_results
+# python evaluate.py --restore_ckpt pretrained_models/simplestereo_sceneflow.pth --dataset things --save_results
 # python evaluate.py --restore_ckpt checkpoints/2024-08-14_22-22-40/checkpoint_035000.pth --dataset kitti --save_results
 # python evaluate.py --restore_ckpt checkpoints/2024-08-14_22-22-40_finetune_kitti/checkpoint_005000.pth --dataset kitti
 
